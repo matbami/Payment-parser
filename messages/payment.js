@@ -1,0 +1,15 @@
+module.exports = {
+  AM01: 'Amount must be a positive integer',
+  CU01: 'Account currency mismatch',
+  CU02: 'Unsupported currency',
+  AC01: 'Insufficient funds in debit account',
+  AC02: 'Debit and credit accounts cannot be the same',
+  AC03: 'Account not found',
+  AC04: 'Invalid account ID format',
+  DT01: 'Invalid date format. Use YYYY-MM-DD',
+  SY01: 'Missing required keyword',
+  SY02: 'Invalid keyword order',
+  SY03: 'Malformed instruction',
+  AP00: 'Transaction executed successfully',
+  AP02: 'Transaction scheduled for future execution',
+};
