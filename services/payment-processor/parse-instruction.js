@@ -3,7 +3,6 @@ const { throwAppError } = require('@app-core/errors');
 const { appLogger } = require('@app-core/logger');
 const PaymentMessages = require('@app/messages/payment');
 
-// Validation Spec
 const spec = `root {
   accounts[] {
     id string
@@ -15,7 +14,9 @@ const spec = `root {
 
 const parsedSpec = validator.parse(spec);
 
-// Utility functions
+/**
+ * Breaks the instruction into words while removing empty spaces.
+ */
 function splitData(data) {
   return data.split(' ').filter(Boolean);
 }
@@ -24,21 +25,31 @@ function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
 
-function isValidAccountId(id) {
-  for (let i = 0; i < id.length; i++) {
-    const c = id[i];
-    const ok =
-      (c >= 'A' && c <= 'Z') ||
-      (c >= 'a' && c <= 'z') ||
-      (c >= '0' && c <= '9') ||
-      c === '-' ||
-      c === '.' ||
-      c === '@';
-    if (!ok) return false;
+/**
+ * Ensures an account ID contains only allowed characters.
+ */
+function isValidAccountId(accountId) {
+  for (let i = 0; i < accountId.length; i++) {
+    const char = accountId[i];
+    const validAccount =
+      (char >= 'A' && char <= 'Z') ||
+      (char >= 'a' && char <= 'z') ||
+      (char >= '0' && char <= '9') ||
+      char === '-' ||
+      char === '.' ||
+      char === '@';
+    if (!validAccount) return false;
   }
   return true;
 }
 
+/**
+ * Validates that keywords in the instruction appear in the right order.
+ * Accepted patterns:
+ *
+ * DEBIT X Y FROM ACCOUNT A FOR CREDIT TO ACCOUNT B
+ * CREDIT X Y TO ACCOUNT B FOR DEBIT FROM ACCOUNT A
+ */
 function isOutOfOrder(keywords, type) {
   if (type === 'DEBIT') {
     const expected = [
@@ -53,11 +64,8 @@ function isOutOfOrder(keywords, type) {
       'TO',
       'ACCOUNT',
     ];
-
     for (let i = 0; i < expected.length; i++) {
-      if (expected[i] && keywords[i]?.toUpperCase() !== expected[i]) {
-        return true;
-      }
+      if (expected[i] && keywords[i]?.toUpperCase() !== expected[i]) return true;
     }
   }
 
@@ -74,17 +82,12 @@ function isOutOfOrder(keywords, type) {
       'FROM',
       'ACCOUNT',
     ];
-
     for (let i = 0; i < expected.length; i++) {
-      if (expected[i] && keywords[i]?.toUpperCase() !== expected[i]) {
-        return true;
-      }
+      if (expected[i] && keywords[i]?.toUpperCase() !== expected[i]) return true;
     }
   }
 
-  if (keywords[11] && keywords[11].toUpperCase() !== 'ON') {
-    return true;
-  }
+  if (keywords[11] && keywords[11].toUpperCase() !== 'ON') return true;
 
   return false;
 }
@@ -104,11 +107,12 @@ function buildErrorResponse(err, parsed) {
   };
 }
 
+/**
+ * Main instruction parser.
+ * Validates the payload, extracts keywords, performs business logic checks,
+ * and returns either a processed instruction or an error response.
+ */
 async function parseInstruction(serviceData) {
-  let response;
-
-  const data = validator.validate(serviceData, parsedSpec);
-
   const parsed = {
     type: null,
     amount: null,
@@ -119,10 +123,12 @@ async function parseInstruction(serviceData) {
     accounts: [],
   };
 
+  let data;
+
   try {
+    data = validator.validate(serviceData, parsedSpec);
     const raw = splitData(data.instruction);
 
-    // Normalize keywords but preserve indices 5 & 10 (account IDs)
     const keywords = raw.map((word, index) =>
       index === 5 || index === 10 ? word : word.toUpperCase()
     );
@@ -130,7 +136,6 @@ async function parseInstruction(serviceData) {
     if (keywords.length < 8) {
       throwAppError(PaymentMessages.SY01, 'SY01');
     }
-
     if (keywords[0] !== 'DEBIT' && keywords[0] !== 'CREDIT') {
       throwAppError(PaymentMessages.SY03, 'SY03');
     }
@@ -139,58 +144,44 @@ async function parseInstruction(serviceData) {
       throwAppError(PaymentMessages.SY02, 'SY02');
     }
 
-    // Assign debit / credit accounts based on type
+    // Extract debit/credit roles based on instruction type
     const [type, , , , , debitAccId, , , , , creditAccId] = keywords;
-
-    if (type === 'DEBIT') {
-      parsed.debit_account = debitAccId;
-      parsed.credit_account = creditAccId;
-    } else {
-      parsed.debit_account = creditAccId;
-      parsed.credit_account = debitAccId;
-    }
-
     parsed.type = type;
+    parsed.debit_account = type === 'DEBIT' ? debitAccId : creditAccId;
+    parsed.credit_account = type === 'DEBIT' ? creditAccId : debitAccId;
 
-    // Amount
+    // Validate & parse amount
     const amount = Number(keywords[1]);
     parsed.amount = amount;
-
-    if (Number.isNaN(amount) || amount <= 0 || !isPositiveInteger(amount)) {
+    if (Number.isNaN(amount) || amount <= 0 || !isPositiveInteger(amount))
       throwAppError(PaymentMessages.AM01, 'AM01');
-    }
 
-    // Currency
+    // Validate currency
     const supported = ['NGN', 'USD', 'GBP', 'GHS'];
     const currency = keywords[2].toUpperCase();
-
+    parsed.currency = currency;
     if (!supported.includes(currency)) {
       throwAppError(PaymentMessages.CU02, 'CU02');
     }
 
-    parsed.currency = currency;
-
-    // Account ID format
     if (!isValidAccountId(keywords[5]) || !isValidAccountId(keywords[10])) {
       throwAppError(PaymentMessages.AC04, 'AC04');
     }
 
-    // Date parsing (if ON keyword exists)
     if (keywords[11] && keywords[11].toUpperCase() === 'ON') {
       const dateString = keywords[12];
-
-      if (!dateString) {
-        throwAppError(PaymentMessages.DT01, 'DT01');
-      }
-
-      if (dateString.length !== 10 || dateString[4] !== '-' || dateString[7] !== '-') {
+      if (
+        !dateString ||
+        dateString.length !== 10 ||
+        dateString[4] !== '-' ||
+        dateString[7] !== '-'
+      ) {
         throwAppError(PaymentMessages.DT01, 'DT01');
       }
 
       parsed.execute_by = dateString;
     }
 
-    // Accounts
     const { accounts } = data;
 
     const debitAcc = accounts.find((a) => a.id === parsed.debit_account);
@@ -199,11 +190,9 @@ async function parseInstruction(serviceData) {
     if (!debitAcc || !creditAcc) {
       throwAppError(PaymentMessages.AC03, 'AC03');
     }
-
     if (debitAcc.currency !== creditAcc.currency) {
       throwAppError(PaymentMessages.CU01, 'CU01');
     }
-
     if (parsed.currency !== debitAcc.currency.toUpperCase()) {
       throwAppError(PaymentMessages.CU01, 'CU01');
     }
@@ -211,17 +200,18 @@ async function parseInstruction(serviceData) {
     if (parsed.debit_account === parsed.credit_account) {
       throwAppError(PaymentMessages.AC02, 'AC02');
     }
-
     if (debitAcc.balance < parsed.amount) {
       throwAppError(PaymentMessages.AC01, 'AC01');
     }
 
+    // Capture original balances
     const debitBefore = debitAcc.balance;
     const creditBefore = creditAcc.balance;
 
     let status = 'successful';
     let statusCode = 'AP00';
 
+    // Schedule future date implementation
     if (parsed.execute_by) {
       const today = new Date().toISOString().slice(0, 10);
       if (parsed.execute_by > today) {
@@ -230,6 +220,7 @@ async function parseInstruction(serviceData) {
       }
     }
 
+    // Apply balance changes only for immediate transactions
     if (status === 'successful') {
       debitAcc.balance -= parsed.amount;
       creditAcc.balance += parsed.amount;
@@ -250,7 +241,7 @@ async function parseInstruction(serviceData) {
       },
     ];
 
-    response = {
+    return {
       ...parsed,
       status,
       status_code: statusCode,
@@ -259,7 +250,8 @@ async function parseInstruction(serviceData) {
   } catch (error) {
     appLogger.errorX(error, 'parse-instruction-error');
 
-    if (parsed.debit_account && parsed.credit_account && data.accounts) {
+    // Attempt to attach account details even during failure
+    if (parsed.debit_account && parsed.credit_account && data?.accounts) {
       const debitAcc = data.accounts.find((a) => a.id === parsed.debit_account);
       const creditAcc = data.accounts.find((a) => a.id === parsed.credit_account);
 
@@ -280,12 +272,11 @@ async function parseInstruction(serviceData) {
               currency: creditAcc.currency,
             }
           : null,
-      ].filter(Boolean); // remove nulls if one account not found
+      ].filter(Boolean);
     }
-    return buildErrorResponse(error, parsed || {});
-  }
 
-  return response;
+    return buildErrorResponse(error, parsed);
+  }
 }
 
 module.exports = parseInstruction;
